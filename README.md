@@ -8,7 +8,27 @@ I created this file primarily for quickly viewing training results. This visuali
 
 Usage
 ======
+I am using it on a Windows system, so it may have issues on other systems.
+
 In addition to the environment required by 3dgs, you also need to install OpenCV
 ```python
 pip install opencv-python
 ```
+
+Change the checkpoint in the file to the path of the PLY file you want to visualize.
+```python
+checkpoint = "your address" 
+```
+
+Launch viewer
+```python
+python Visual_Gaussian.py
+```
+
+Use W, A, S, D, Q, E to control camera movement, and use J, K, L, I, U, O to control camera view movement.
+
+Use - and = to control the size of the Gaussian kernel.
+
+Use C to exit the screen.
+
+
