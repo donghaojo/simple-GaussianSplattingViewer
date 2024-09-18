@@ -22,7 +22,7 @@ checkpoint = "your address"
 ```
 
 Launch viewer
-```python
+```
 python Visual_Gaussian.py
 ```
 
