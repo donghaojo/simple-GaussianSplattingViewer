@@ -1,4 +1,4 @@
-GaussianSplattingViewer-Builtwith-a-Single-Python-File
+simple-GaussianSplattingViewer
 ======
 
 Place this file under the 3dgs directory to use it. 
