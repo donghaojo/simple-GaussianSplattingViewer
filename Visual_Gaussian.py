@@ -40,29 +40,31 @@ def euler_angles_to_rotation_matrix(theta):
     R = np.dot(R_z, np.dot(R_y, R_x))
     return R
 
-def update_camera_position(Cam,delta_x, delta_y, delta_z):
-    initial_forward_vector = np.array([delta_x, delta_y, delta_z])
-    forward_vector = np.dot( np.linalg.inv(Cam.R), initial_forward_vector)
-    Cam.T += forward_vector
-    Cam.world_view_transform = torch.tensor(getWorld2View(Cam.R, Cam.T)).transpose(0,1).cuda()
-    Cam.full_proj_transform = (
-        Cam.world_view_transform.unsqueeze(0).bmm(Cam.projection_matrix.unsqueeze(0))
-    ).squeeze(0)
-    Cam.camera_center = Cam.world_view_transform.inverse()[3, :3]
-
-def update_camera_rotation(Cam,delta_theta_x, delta_theta_y,delta_theta_z):
-    """ 更新相机旋转 """
-    camera_theta[0] -= delta_theta_x
-    camera_theta[1] -= delta_theta_y
-    camera_theta[2] -= delta_theta_z
-    Cam.R =euler_angles_to_rotation_matrix(camera_theta)
+def _refresh_camera(Cam):
+    """Recompute derived camera matrices after R or T changes."""
     Cam.world_view_transform = torch.tensor(getWorld2View(Cam.R, Cam.T)).transpose(0, 1).cuda()
     Cam.full_proj_transform = (
         Cam.world_view_transform.unsqueeze(0).bmm(Cam.projection_matrix.unsqueeze(0))
     ).squeeze(0)
     Cam.camera_center = Cam.world_view_transform.inverse()[3, :3]
 
-def create_camera(camera_init_position,camera_init_theta):
+def update_camera_position(Cam, delta_x, delta_y, delta_z):
+    # delta is expressed in camera local space; transform to world space via R^T (= R^{-1}).
+    # Cam.T = -camera_world_pos, so moving the camera forward means subtracting the world delta.
+    delta_cam = np.array([delta_x, delta_y, delta_z])
+    delta_world = Cam.R.T @ delta_cam
+    Cam.T -= delta_world
+    _refresh_camera(Cam)
+
+def update_camera_rotation(Cam, camera_theta, delta_theta_x, delta_theta_y, delta_theta_z):
+    """更新相机旋转"""
+    camera_theta[0] -= delta_theta_x
+    camera_theta[1] -= delta_theta_y
+    camera_theta[2] -= delta_theta_z
+    Cam.R = euler_angles_to_rotation_matrix(camera_theta)
+    _refresh_camera(Cam)
+
+def create_camera(camera_init_position, camera_init_theta):
     camera_position = np.array(camera_init_position).astype(float)
     theta = np.array(camera_init_theta).astype(float)
     R = euler_angles_to_rotation_matrix(theta)
@@ -70,7 +72,7 @@ def create_camera(camera_init_position,camera_init_theta):
     Cam = Camera(colmap_id=0, R=R, T=T,
                  FoVx=1, FoVy=1, image=torch.tensor(torch.zeros((3, 1024, 1024)), dtype=torch.float32), gt_alpha_mask=None,
                  image_name=None, data_device=0, uid=id)
-    update_camera_position(Cam, 0, 0, 0)
+    _refresh_camera(Cam)
     return Cam
 
 
@@ -94,14 +96,17 @@ if __name__ == "__main__":
     args.save_iterations.append(args.iterations)
 
     #The initialization of camera coordinates and viewing angle parameters
-    camera_position = [0,0,0]
-    camera_theta = [0,0,0]
+    camera_position = [0, 0, 0]
+    camera_theta = [0, 0, 0]
     checkpoint = r".\apples\point_cloud\iteration_30000\point_cloud.ply" #ply file address
-    speed_move = 1  #Camera speed
-    speed_rotation = 0.05  # Camera rotation
-    s_mod = 1 #Gaussian size scaling
+    speed_move = 1              # Camera translation speed
+    speed_rotation = 0.05       # Camera rotation speed (keyboard)
+    mouse_rotation_speed = 0.005  # Camera rotation speed (mouse drag)
+    mouse_zoom_speed = 0.05     # Gaussian scale change per scroll tick
+    min_gaussian_scale = 0.01   # Minimum allowed s_mod value
+    s_mod = 1                   # Gaussian size scaling
 
-    Cam = create_camera(camera_position,camera_theta)
+    Cam = create_camera(camera_position, camera_theta)
 
     gaussians = GaussianModel(3)
     #scene = Scene(lp.extract(args), gaussians)
@@ -109,7 +114,33 @@ if __name__ == "__main__":
     gaussians.load_ply(checkpoint)
     gaussians.training_setup(op)
     gaussians._features_dc.requires_grad_(False)
-    background = torch.tensor([0,0,0], dtype=torch.float32, device="cuda")
+    background = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
+
+    # Mouse state for drag-to-rotate and scroll-to-zoom
+    mouse_state = {'dragging': False, 'last_x': 0, 'last_y': 0}
+
+    def mouse_callback(event, x, y, flags, param):
+        nonlocal s_mod
+        if event == cv2.EVENT_LBUTTONDOWN:
+            mouse_state['dragging'] = True
+            mouse_state['last_x'] = x
+            mouse_state['last_y'] = y
+        elif event == cv2.EVENT_LBUTTONUP:
+            mouse_state['dragging'] = False
+        elif event == cv2.EVENT_MOUSEMOVE and mouse_state['dragging']:
+            dx = x - mouse_state['last_x']
+            dy = y - mouse_state['last_y']
+            mouse_state['last_x'] = x
+            mouse_state['last_y'] = y
+            # dy → pitch (theta_x),  dx → yaw (theta_y)
+            update_camera_rotation(Cam, camera_theta,
+                                   dy * mouse_rotation_speed,
+                                   dx * mouse_rotation_speed, 0)
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            s_mod = max(min_gaussian_scale, s_mod + (mouse_zoom_speed if flags > 0 else -mouse_zoom_speed))
+
+    cv2.namedWindow('Rendered Video Stream')
+    cv2.setMouseCallback('Rendered Video Stream', mouse_callback)
 
     while True:
         image = render(Cam, gaussians, pp, background, scaling_modifier=s_mod)['render']
@@ -120,36 +151,36 @@ if __name__ == "__main__":
         key = cv2.waitKey(1) & 0xFF
         if key == ord('c'):
             break
+        # WASD + QE: deltas are in camera-local space (fixed sign relative to original)
         elif key == ord('a'):
-            update_camera_position(Cam,speed_move, 0, 0)
+            update_camera_position(Cam, -speed_move, 0, 0)   # strafe left  (−x)
         elif key == ord('d'):
-            update_camera_position(Cam,-speed_move, 0, 0)
+            update_camera_position(Cam,  speed_move, 0, 0)   # strafe right (+x)
         elif key == ord('w'):
-            update_camera_position(Cam,0, 0, -speed_move)
+            update_camera_position(Cam, 0, 0, -speed_move)   # move forward (−z)
         elif key == ord('s'):
-            update_camera_position(Cam,0, 0, speed_move)
+            update_camera_position(Cam, 0, 0,  speed_move)   # move back    (+z)
         elif key == ord('q'):
-            update_camera_position(Cam,0, speed_move, 0)
+            update_camera_position(Cam, 0, -speed_move, 0)   # move up      (−y)
         elif key == ord('e'):
-            update_camera_position(Cam,0, -speed_move, 0)
+            update_camera_position(Cam, 0,  speed_move, 0)   # move down    (+y)
         elif key == ord('i'):
-            update_camera_rotation(Cam,speed_rotation, 0,0)
+            update_camera_rotation(Cam, camera_theta,  speed_rotation, 0, 0)
         elif key == ord('k'):
-            update_camera_rotation(Cam,-speed_rotation, 0,0)
+            update_camera_rotation(Cam, camera_theta, -speed_rotation, 0, 0)
         elif key == ord('j'):
-            update_camera_rotation(Cam,0, -speed_rotation,0)
+            update_camera_rotation(Cam, camera_theta, 0, -speed_rotation, 0)
         elif key == ord('l'):
-            update_camera_rotation(Cam,0, speed_rotation,0)
+            update_camera_rotation(Cam, camera_theta, 0,  speed_rotation, 0)
         elif key == ord('u'):
-            update_camera_rotation(Cam,0,0, -speed_rotation)
+            update_camera_rotation(Cam, camera_theta, 0, 0, -speed_rotation)
         elif key == ord('o'):
-            update_camera_rotation(Cam,0, 0,speed_rotation)
+            update_camera_rotation(Cam, camera_theta, 0, 0,  speed_rotation)
         elif key == ord('='):
             s_mod += 0.01
         elif key == ord('-'):
-            s_mod -= 0.01
+            s_mod = max(min_gaussian_scale, s_mod - 0.01)
         elif key == ord('9'):
-            cv2.imwrite("image.jpg", image*255)
-
+            cv2.imwrite("image.jpg", image * 255)
 
     cv2.destroyAllWindows()
